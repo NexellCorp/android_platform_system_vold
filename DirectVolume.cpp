@@ -220,7 +220,9 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     } else {
         mPartMinors[part_num -1] = minor;
     }
-    mPendingPartMap &= ~(1 << part_num);
+    // psw0523 fix for partition > 1
+    //mPendingPartMap &= ~(1 << part_num);
+    mPendingPartMap = 0;
 
     if (!mPendingPartMap) {
 #ifdef PARTITION_DEBUG
