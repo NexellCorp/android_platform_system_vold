@@ -31,7 +31,7 @@
 #include "ResponseCode.h"
 #include "cryptfs.h"
 
-// #define PARTITION_DEBUG
+//#define PARTITION_DEBUG
 
 DirectVolume::DirectVolume(VolumeManager *vm, const fstab_rec* rec, int flags) :
         Volume(vm, rec, flags) {
@@ -42,6 +42,9 @@ DirectVolume::DirectVolume(VolumeManager *vm, const fstab_rec* rec, int flags) :
     mDiskMajor = -1;
     mDiskMinor = -1;
     mDiskNumParts = 0;
+    mIsDecrypted = 0;
+    mOrigDiskMajor = -1;
+    mOrigDiskMinor = -1;
 
     if (strcmp(rec->mount_point, "auto") != 0) {
         ALOGE("Vold managed volumes must have auto mount point; ignoring %s",
@@ -50,10 +53,16 @@ DirectVolume::DirectVolume(VolumeManager *vm, const fstab_rec* rec, int flags) :
 
     char mount[PATH_MAX];
 
+#ifdef MINIVOLD
+    // In recovery, directly mount to /storage/* since we have no fuse daemon
+    snprintf(mount, PATH_MAX, "%s/%s", Volume::FUSE_DIR, rec->label);
+    mMountpoint = mFuseMountpoint = strdup(mount);
+#else
     snprintf(mount, PATH_MAX, "%s/%s", Volume::MEDIA_DIR, rec->label);
     mMountpoint = strdup(mount);
     snprintf(mount, PATH_MAX, "%s/%s", Volume::FUSE_DIR, rec->label);
     mFuseMountpoint = strdup(mount);
+#endif
 
     setState(Volume::State_NoMedia);
 }
@@ -77,6 +86,14 @@ dev_t DirectVolume::getDiskDevice() {
 
 dev_t DirectVolume::getShareDevice() {
     if (mPartIdx != -1) {
+#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
+        int major = getMajorNumberForBadPartition(mPartIdx);
+        if(major != -1) {
+            SLOGE("getShareDevice() returning correct major: %d, minor: %d", major, mPartMinors[mPartIdx - 1]);
+            return MKDEV(major, mPartMinors[mPartIdx - 1]);
+        }
+        else
+#endif
         return MKDEV(mDiskMajor, mPartIdx);
     } else {
         return MKDEV(mDiskMajor, mDiskMinor);
@@ -174,7 +191,9 @@ void DirectVolume::handleDiskAdded(const char *devpath, NetlinkEvent *evt) {
 #ifdef PARTITION_DEBUG
         SLOGD("Dv::diskIns - No partitions - good to go son!");
 #endif
-        setState(Volume::State_Idle);
+        // Do not leave idle state if already in (avoids warnings)
+        if (getState() != Volume::State_Idle)
+            setState(Volume::State_Idle);
     } else {
 #ifdef PARTITION_DEBUG
         SLOGD("Dv::diskIns - waiting for %d partitions (mask 0x%x)",
@@ -199,6 +218,8 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
         part_num = 1;
     }
 
+    SLOGD("DirectVolume::handlePartitionAdded -> MAJOR %d, MINOR %d, PARTN %d\n", major, minor, part_num);
+
     if (part_num > MAX_PARTITIONS || part_num < 1) {
         SLOGE("Invalid 'PARTN' value");
         return;
@@ -209,30 +230,36 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     }
 
     if (major != mDiskMajor) {
-        SLOGE("Partition '%s' has a different major than its disk!", devpath);
+#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
+        ValuePair vp;
+        vp.major = major;
+        vp.part_num = part_num;
+        badPartitions.push_back(vp);
+        // Errors with internal volume are expected, so do not show them
+        if(strcmp(getLabel(), VOLD_INTERNAL_VOLUME))
+#endif
+        SLOGE("Partition '%s' of '%s' has a different major than its disk!", devpath, getLabel());
+#ifndef VOLD_DISC_HAS_MULTIPLE_MAJORS
         return;
+#endif
     }
 #ifdef PARTITION_DEBUG
-    SLOGD("Dv:partAdd: devpath %s, label %s, part_num = %d, minor = %d\n", devpath, getLabel(), part_num, minor);
+    SLOGD("Dv:partAdd: part_num = %d, minor = %d\n", part_num, minor);
 #endif
-    if (part_num >= MAX_PARTITIONS) {
-        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS-1);
+    if (part_num > MAX_PARTITIONS) {
+        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS);
     } else {
         mPartMinors[part_num -1] = minor;
     }
-    // psw0523 fix for partition > 1
-    //mPendingPartMap &= ~(1 << part_num);
-    mPendingPartMap = 0;
+    mPendingPartMap &= ~(1 << part_num);
 
     if (!mPendingPartMap) {
 #ifdef PARTITION_DEBUG
-        SLOGD("Dv:partAdd: Got all partitions - ready to rock!, mRetryMount %d", mRetryMount);
+        SLOGD("Dv:partAdd: Got all partitions - ready to rock!");
 #endif
         if (getState() != Volume::State_Formatting) {
             setState(Volume::State_Idle);
-            // psw0523 fix for usb storage connected booting NO Mount Problem ==> early mount
-            //if (mRetryMount == true) {
-            if (mRetryMount == true || !strncmp(getLabel(), "usbdisk", 7)) {
+            if (mRetryMount == true) {
                 mRetryMount = false;
                 mountVol();
             }
@@ -319,7 +346,7 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
     if (state != Volume::State_Mounted && state != Volume::State_Shared) {
         return;
     }
-
+        
     if ((dev_t) MKDEV(major, minor) == mCurrentlyMountedKdev) {
         /*
          * Yikes, our mounted partition is going away!
@@ -336,7 +363,7 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
                                              msg, false);
 
         if (Volume::unmountVol(true, false)) {
-            SLOGE("Failed to unmount volume on bad removal (%s)",
+            SLOGE("Failed to unmount volume on bad removal (%s)", 
                  strerror(errno));
             // XXX: At this point we're screwed for now
         } else {
@@ -367,6 +394,7 @@ int DirectVolume::getDeviceNodes(dev_t *devs, int max) {
         // If the disk has no partitions, try the disk itself
         if (!mDiskNumParts) {
             devs[0] = MKDEV(mDiskMajor, mDiskMinor);
+            SLOGD("Disc has only one partition.");
             return 1;
         }
 
@@ -374,13 +402,52 @@ int DirectVolume::getDeviceNodes(dev_t *devs, int max) {
         for (i = 0; i < mDiskNumParts; i++) {
             if (i == max)
                 break;
+#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
+            int major = getMajorNumberForBadPartition(i + 1);
+            if(major != -1) {
+                SLOGE("Fixing major number from %d to %d for partition %d", mDiskMajor, major, i + 1);
+                devs[i] = MKDEV(major, mPartMinors[i]);
+            }
+            else
+#endif
             devs[i] = MKDEV(mDiskMajor, mPartMinors[i]);
         }
         return mDiskNumParts;
     }
+#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
+    int major = getMajorNumberForBadPartition(mPartIdx);
+    if(major != -1) {
+        SLOGE("Fixing major number from %d to %d for partition %d", mDiskMajor, major, mPartIdx);
+        devs[0] = MKDEV(major, mPartMinors[mPartIdx - 1]);
+    }
+    else
+#endif
     devs[0] = MKDEV(mDiskMajor, mPartMinors[mPartIdx -1]);
     return 1;
 }
+
+#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
+/*
+ * Returns the correct major number for a bad partition.
+ * Returns -1 if the partition is good.
+ */
+int DirectVolume::getMajorNumberForBadPartition(int part_num) {
+    SLOGD("Checking for bad partition major number");
+    bool found = false;
+    android::List<ValuePair>::iterator iterator = badPartitions.begin();
+    for(;iterator != badPartitions.end(); iterator++) {
+        if((*iterator).part_num == part_num) {
+            found = true;
+            SLOGD("Found bad partition");
+            break;
+        }
+    }
+    if(found == true)
+        return (*iterator).major;
+    else
+        return -1;
+}
+#endif
 
 /*
  * Called from base to update device info,
