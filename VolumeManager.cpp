@@ -130,6 +130,11 @@ int VolumeManager::addVolume(Volume *v) {
     return 0;
 }
 
+#if 1 // ischoi
+bool usb_storage_mounted = false;
+bool second_netlinkevent = false;
+#endif
+
 void VolumeManager::handleBlockEvent(NetlinkEvent *evt) {
     const char *devpath = evt->findParam("DEVPATH");
 
@@ -146,11 +151,65 @@ void VolumeManager::handleBlockEvent(NetlinkEvent *evt) {
         }
     }
 
-    if (!hit) {
+    if (1)//(!hit) // ischoi, usolex, 150209
+    {
 #ifdef NETLINK_DEBUG
         SLOGW("No volumes handled block event for '%s'", devpath);
 #endif
+
+#if 1 // ischoi
+        if (second_netlinkevent) {
+            second_netlinkevent = false;
+            return;
+        }
+
+        char *usb_mass_node = "/devices/platform/nxp-ehci/usb1/1-1/1-1.";
+	  char mounting_dir_name[50];
+        char mount_block_name[50];
+	  char *str;
+	  char index_str[5];
+
+	  str = strstr(devpath, "1-1.");
+	  if (str == 0)
+	  {
+            second_netlinkevent = false;
+            return;
+	   }
+	  
+	  index_str[0] = *(str+4);
+	  index_str[1] = '\0';
+	  strcpy(mounting_dir_name, "/storage/usbdisk");
+	  strcat(mounting_dir_name, index_str);
+	  
+        if (usb_storage_mounted) {
+            umount(mounting_dir_name);
+            usb_storage_mounted = false;
+            SLOGD("UUUUUUUUUUUUUUU --> USB Mass Storage: %s", mounting_dir_name);
+        }
+
+	 {
+            int len = strlen(usb_mass_node);
+            if (strncmp(devpath, usb_mass_node, len) == 0) {
+                usleep(5000);
+		   str = strstr(devpath, "block");
+		    strcpy(mount_block_name, "/dev/");
+		   strcat(mount_block_name, str);
+                if (Fat::doMount(mount_block_name, mounting_dir_name, false, false, false,
+                 		1000, 1015, 0702, true)) {
+                    SLOGE("%s failed to mount via VFAT (%s) at %s\n", devpath, strerror(errno), mount_block_name);
+                } else {
+                    SLOGD("MMMMMMMMMMMMMMMMM --> USB Mass Storage : %s", mounting_dir_name);
+                    usb_storage_mounted = true;
+                }
+            } else {
+                SLOGE("not USB Mass Storage");
+            }
+        }
+
+        second_netlinkevent = true;
+#endif
     }
+
 }
 
 int VolumeManager::listVolumes(SocketClient *cli) {
