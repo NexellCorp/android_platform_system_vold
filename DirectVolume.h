@@ -21,6 +21,10 @@
 
 #include "Volume.h"
 
+#ifndef VOLD_MAX_PARTITIONS
+#define VOLD_MAX_PARTITIONS 32
+#endif
+
 class PathInfo {
 public:
 	PathInfo(const char *pattern);
@@ -37,7 +41,7 @@ typedef android::List<PathInfo *> PathCollection;
 
 class DirectVolume : public Volume {
 public:
-    static const int MAX_PARTITIONS = 32;
+    static const int MAX_PARTITIONS = VOLD_MAX_PARTITIONS;
 protected:
     const char* mMountpoint;
     const char* mFuseMountpoint;
@@ -52,6 +56,17 @@ protected:
     int            mDiskNumParts;
     int            mPendingPartCount;
     int            mIsDecrypted;
+    bool           mIsValid;
+
+#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
+private:
+    struct ValuePair {
+        int major;
+        int part_num;
+    };
+
+    android::List<ValuePair> badPartitions;
+#endif
 
 public:
     DirectVolume(VolumeManager *vm, const fstab_rec* rec, int flags);
@@ -61,6 +76,8 @@ public:
 
     const char *getMountpoint() { return mMountpoint; }
     const char *getFuseMountpoint() { return mFuseMountpoint; }
+    bool isValidSysfs() { return mIsValid; }
+    void setValidSysfs(bool val) { mIsValid = val; }
 
     int handleBlockEvent(NetlinkEvent *evt);
     dev_t getDiskDevice();
@@ -84,6 +101,10 @@ private:
     void handlePartitionChanged(const char *devpath, NetlinkEvent *evt);
 
     int doMountVfat(const char *deviceNode, const char *mountPoint);
+    int getUICCVolumeNum(const char *dp);
+#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
+    int getMajorNumberForBadPartition(int part_num);
+#endif
 
 };
 

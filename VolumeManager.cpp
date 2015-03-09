@@ -53,7 +53,7 @@
 #include "Asec.h"
 #include "cryptfs.h"
 
-#define MASS_STORAGE_FILE_PATH  "/sys/class/android_usb/android0/f_mass_storage/lun/file"
+#define UICC0_MASS_STORAGE_PATH  "/sys/class/android_usb/android0/f_mass_storage/uicc0/file"
 
 #define ROUND_UP_POWER_OF_2(number, po2) (((!!(number & ((1U << po2) - 1))) << po2)\
                                          + (number & (~((1U << po2) - 1))))
@@ -233,6 +233,17 @@ int VolumeManager::stop() {
 }
 
 int VolumeManager::addVolume(Volume *v) {
+    // If entry is duplicated then mark isValid to false for both of them.
+    // Mark the valid entry on the first insertion of the card on handleBlockEvent()
+    VolumeCollection::iterator it;
+    for (it = mVolumes->begin(); it != mVolumes->end(); ++it) {
+        if(!strncmp((*it)->getLabel(), v->getLabel(), strlen((*it)->getLabel()))) {
+            (*it)->setValidSysfs(false);
+            v->setValidSysfs(false);
+        }
+    }
+
+    v->setLunNumber(mVolumes->size());
     mVolumes->push_back(v);
     return 0;
 }
@@ -265,12 +276,15 @@ int VolumeManager::listVolumes(SocketClient *cli, bool broadcast) {
     char msg[256];
 
     for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
-        char *buffer;
-        asprintf(&buffer, "%s %s %d",
-                 (*i)->getLabel(), (*i)->getFuseMountpoint(),
-                 (*i)->getState());
-        cli->sendMsg(ResponseCode::VolumeListResult, buffer, false);
-        free(buffer);
+        if ((*i)->isValidSysfs()) {
+            char *buffer;
+            asprintf(&buffer, "%s %s %d",
+                     (*i)->getLabel(), (*i)->getFuseMountpoint(),
+                     (*i)->getState());
+            cli->sendMsg(ResponseCode::VolumeListResult, buffer, false);
+            free(buffer);
+        }
+
         if (broadcast) {
             if((*i)->getUuid()) {
                 snprintf(msg, sizeof(msg), "%s %s \"%s\"", (*i)->getLabel(),
@@ -552,7 +566,7 @@ int VolumeManager::createAsec(const char *id, unsigned int numSectors, const cha
 
         int mountStatus;
         if (usingExt4) {
-            mountStatus = Ext4::doMount(dmDevice, mountPoint, false, false, false);
+            mountStatus = Ext4::doMount(dmDevice, mountPoint, false, false, false, false);
         } else {
             mountStatus = Fat::doMount(dmDevice, mountPoint, false, false, false, ownerUid, 0, 0000,
                     false);
@@ -771,7 +785,7 @@ int VolumeManager::finalizeAsec(const char *id) {
 
     int result = 0;
     if (sb.c_opts & ASEC_SB_C_OPTS_EXT4) {
-        result = Ext4::doMount(loopDevice, mountPoint, true, true, true);
+        result = Ext4::doMount(loopDevice, mountPoint, true, true, true, false);
     } else {
         result = Fat::doMount(loopDevice, mountPoint, true, true, true, 0, 0, 0227, false);
     }
@@ -840,7 +854,8 @@ int VolumeManager::fixupAsecPermissions(const char *id, gid_t gid, const char* f
     int ret = Ext4::doMount(loopDevice, mountPoint,
             false /* read-only */,
             true  /* remount */,
-            false /* executable */);
+            false /* executable */,
+            false /* sdcard */);
     if (ret) {
         SLOGE("Unable remount to fix permissions for %s (%s)", id, strerror(errno));
         return -1;
@@ -902,7 +917,8 @@ int VolumeManager::fixupAsecPermissions(const char *id, gid_t gid, const char* f
     result |= Ext4::doMount(loopDevice, mountPoint,
             true /* read-only */,
             true /* remount */,
-            true /* execute */);
+            true /* execute */,
+            false /* sdcard */);
 
     if (result) {
         SLOGE("ASEC fix permissions failed (%s)", strerror(errno));
@@ -1339,7 +1355,7 @@ int VolumeManager::mountAsec(const char *id, const char *key, int ownerUid, bool
 
     int result;
     if (sb.c_opts & ASEC_SB_C_OPTS_EXT4) {
-        result = Ext4::doMount(dmDevice, mountPoint, readOnly, false, readOnly);
+        result = Ext4::doMount(dmDevice, mountPoint, readOnly, false, readOnly, false);
     } else {
         result = Fat::doMount(dmDevice, mountPoint, readOnly, false, readOnly, ownerUid, 0, 0222, false);
     }
@@ -1364,9 +1380,11 @@ Volume* VolumeManager::getVolumeForFile(const char *fileName) {
     VolumeCollection::iterator i;
 
     for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
-        const char* mountPoint = (*i)->getFuseMountpoint();
-        if (!strncmp(fileName, mountPoint, strlen(mountPoint))) {
-            return *i;
+        if ((*i)->isValidSysfs()) {
+            const char* mountPoint = (*i)->getFuseMountpoint();
+            if (!strncmp(fileName, mountPoint, strlen(mountPoint))) {
+                return *i;
+            }
         }
     }
 
@@ -1531,6 +1549,36 @@ int VolumeManager::shareEnabled(const char *label, const char *method, bool *ena
     return 0;
 }
 
+static const char *LUN_FILES[] = {
+#ifdef CUSTOM_LUN_FILE
+    CUSTOM_LUN_FILE,
+#endif
+    /* Only android0 exists, but the %d in there is a hack to satisfy the
+       format string and also give a not found error when %d > 0 */
+    "/sys/class/android_usb/android%d/f_mass_storage/lun/file",
+    NULL
+};
+
+int VolumeManager::openLun(int number) {
+    const char **iterator = LUN_FILES;
+    char qualified_lun[255];
+    while (*iterator) {
+        bzero(qualified_lun, 255);
+        snprintf(qualified_lun, 254, *iterator, number);
+        int fd = open(qualified_lun, O_WRONLY);
+        if (fd >= 0) {
+            SLOGD("Opened lunfile %s", qualified_lun);
+            return fd;
+        }
+        SLOGE("Unable to open ums lunfile %s (%s)", qualified_lun, strerror(errno));
+        iterator++;
+    }
+
+    errno = EINVAL;
+    SLOGE("Unable to find ums lunfile for LUN %d", number);
+    return -1;
+}
+
 int VolumeManager::shareVolume(const char *label, const char *method) {
     Volume *v = lookupVolume(label);
 
@@ -1572,6 +1620,17 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
         return -1;
     }
 
+#ifdef VOLD_EMMC_SHARES_DEV_MAJOR
+    // If emmc and sdcard share dev major number, vold may pick
+    // incorrectly based on partition nodes alone. Use device nodes instead.
+    v->getDeviceNodes((dev_t *) &d, 1);
+    if ((MAJOR(d) == 0) && (MINOR(d) == 0)) {
+        // This volume does not support raw disk access
+        errno = EINVAL;
+        return -1;
+    }
+#endif
+
     int fd;
     char nodepath[255];
     int written = snprintf(nodepath,
@@ -1583,9 +1642,14 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
         return -1;
     }
 
-    if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
-        SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
-        return -1;
+    if (!strncmp(v->getLabel(), "uicc0", strlen("uicc0"))) {
+        if ((fd = open(UICC0_MASS_STORAGE_PATH, O_WRONLY)) < 0) {
+            SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
+            return -1;
+        }
+    } else {
+        if ((fd = openLun(v->getLunNumber())) < 0)
+            return -1;
     }
 
     if (write(fd, nodepath, strlen(nodepath)) < 0) {
@@ -1633,10 +1697,8 @@ int VolumeManager::unshareVolume(const char *label, const char *method) {
     }
 
     int fd;
-    if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
-        SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
+    if ((fd = openLun(v->getLunNumber())) < 0)
         return -1;
-    }
 
     char ch = 0;
     if (write(fd, &ch, 1) < 0) {
@@ -1677,8 +1739,10 @@ int VolumeManager::getNumDirectVolumes(void) {
     int n=0;
 
     for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
-        if ((*i)->getShareDevice() != (dev_t)0) {
-            n++;
+        if ((*i)->isValidSysfs()) {
+            if ((*i)->getShareDevice() != (dev_t)0) {
+                n++;
+            }
         }
     }
     return n;
@@ -1695,18 +1759,20 @@ int VolumeManager::getDirectVolumeList(struct volume_info *vol_list) {
     dev_t d;
 
     for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
-        if ((d=(*i)->getShareDevice()) != (dev_t)0) {
-            (*i)->getVolInfo(&vol_list[n]);
-            snprintf(vol_list[n].blk_dev, sizeof(vol_list[n].blk_dev),
-                     "/dev/block/vold/%d:%d", major(d), minor(d));
-            n++;
+        if ((*i)->isValidSysfs()) {
+            if ((d=(*i)->getShareDevice()) != (dev_t)0) {
+                (*i)->getVolInfo(&vol_list[n]);
+                snprintf(vol_list[n].blk_dev, sizeof(vol_list[n].blk_dev),
+                         "/dev/block/vold/%d:%d", major(d), minor(d));
+                n++;
+            }
         }
     }
 
     return 0;
 }
 
-int VolumeManager::unmountVolume(const char *label, bool force, bool revert) {
+int VolumeManager::unmountVolume(const char *label, bool force, bool revert, bool detach) {
     Volume *v = lookupVolume(label);
 
     if (!v) {
@@ -1728,7 +1794,7 @@ int VolumeManager::unmountVolume(const char *label, bool force, bool revert) {
 
     cleanupAsec(v, force);
 
-    return v->unmountVol(force, revert);
+    return v->unmountVol(force, revert, detach);
 }
 
 extern "C" int vold_unmountAllAsecs(void) {
@@ -1794,12 +1860,14 @@ Volume *VolumeManager::lookupVolume(const char *label) {
     VolumeCollection::iterator i;
 
     for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
-        if (label[0] == '/') {
-            if (!strcmp(label, (*i)->getFuseMountpoint()))
-                return (*i);
-        } else {
-            if (!strcmp(label, (*i)->getLabel()))
-                return (*i);
+        if ((*i)->isValidSysfs()) {
+            if (label[0] == '/') {
+                if (!strcmp(label, (*i)->getFuseMountpoint()))
+                    return (*i);
+            } else {
+                if (!strcmp(label, (*i)->getLabel()))
+                    return (*i);
+            }
         }
     }
     return NULL;
@@ -1838,6 +1906,11 @@ int VolumeManager::cleanupAsec(Volume *v, bool force) {
 
     AsecIdCollection removeAsec;
     AsecIdCollection removeObb;
+
+    // Only primary storage needs ASEC cleanup
+    if (!(v->getFlags() & VOL_PROVIDES_ASEC)) {
+        return 0;
+    }
 
     for (AsecIdCollection::iterator it = mActiveContainers->begin(); it != mActiveContainers->end();
             ++it) {
