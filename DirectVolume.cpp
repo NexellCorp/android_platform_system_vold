@@ -248,7 +248,7 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
         return;
     }
 #ifdef PARTITION_DEBUG
-    SLOGD("Dv:partAdd: devpath %s, label %s, part_num = %d, minor = %d\n", devpath, getLabel(), part_num, minor);
+    SLOGD("Dv:partAdd: part_num = %d, minor = %d\n", part_num, minor);
 #endif
     if (part_num >= MAX_PARTITIONS) {
         SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS-1);
@@ -260,13 +260,11 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
 
     if (!mPendingPartCount) {
 #ifdef PARTITION_DEBUG
-        SLOGD("Dv:partAdd: Got all partitions - ready to rock!, mRetryMount %d", mRetryMount);
+        SLOGD("Dv:partAdd: Got all partitions - ready to rock!");
 #endif
         if (getState() != Volume::State_Formatting) {
             setState(Volume::State_Idle);
-            // psw0523 fix for usb storage connected booting NO Mount Problem ==> early mount
-            //if (mRetryMount == true) {
-            if (mRetryMount == true || !strncmp(getLabel(), "usbdisk", 7)) {
+            if (mRetryMount == true) {
                 mRetryMount = false;
                 mountVol();
             }
