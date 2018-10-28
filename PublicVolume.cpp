@@ -15,6 +15,8 @@
  */
 
 #include "fs/Vfat.h"
+#include "fs/Exfat.h"
+#include "fs/Ntfs.h"
 #include "PublicVolume.h"
 #include "Utils.h"
 #include "VolumeManager.h"
@@ -43,7 +45,7 @@ static const char* kAsecPath = "/mnt/secure/asec";
 
 PublicVolume::PublicVolume(dev_t device) :
         VolumeBase(Type::kPublic), mDevice(device), mFusePid(0) {
-    setId(StringPrintf("public:%u,%u", major(device), minor(device)));
+    setId(StringPrintf("public:%u_%u", major(device), minor(device)));
     mDevPath = StringPrintf("/dev/block/vold/%s", getId().c_str());
 }
 
@@ -90,17 +92,16 @@ status_t PublicVolume::doDestroy() {
     return DestroyDeviceNode(mDevPath);
 }
 
+#include <cutils/properties.h>
+
+static const char *CHECKFS_PROP_KEY = "persist.vold.check_fs";
+
 status_t PublicVolume::doMount() {
     // TODO: expand to support mounting other filesystems
     readMetadata();
 
-    if (mFsType != "vfat") {
+    if (!IsFilesystemSupported(mFsType)) {
         LOG(ERROR) << getId() << " unsupported filesystem " << mFsType;
-        return -EIO;
-    }
-
-    if (vfat::Check(mDevPath)) {
-        LOG(ERROR) << getId() << " failed filesystem check";
         return -EIO;
     }
 
@@ -128,8 +129,41 @@ status_t PublicVolume::doMount() {
         return -errno;
     }
 
-    if (vfat::Mount(mDevPath, mRawPath, false, false, false,
-            AID_MEDIA_RW, AID_MEDIA_RW, 0007, true)) {
+    int ret = 0;
+    int val = property_get_bool(CHECKFS_PROP_KEY, 1);
+    if (val == 1) {
+        if (mFsType == "exfat") {
+            ret = exfat::Check(mDevPath);
+        } else if (mFsType == "ntfs") {
+            ret = ntfs::Check(mDevPath);
+        } else if (mFsType == "vfat") {
+            ret = vfat::Check(mDevPath);
+        } else {
+            LOG(WARNING) << getId() << " unsupported filesystem check, skipping";
+        }
+
+        if (ret) {
+            LOG(ERROR) << getId() << " failed filesystem check";
+            return -EIO;
+        }
+    } else {
+        LOG(WARNING) << getId() << " persist.vold.check_fs prop is 0, skipping check fs";
+    }
+
+    if (mFsType == "exfat") {
+        ret = exfat::Mount(mDevPath, mRawPath, false, false, false,
+                           AID_MEDIA_RW, AID_MEDIA_RW, 0007);
+    } else if (mFsType == "ntfs") {
+        ret = ntfs::Mount(mDevPath, mRawPath, false, false, false,
+                AID_MEDIA_RW, AID_MEDIA_RW, 0007, true);
+    } else if (mFsType == "vfat") {
+        ret = vfat::Mount(mDevPath, mRawPath, false, false, false,
+                AID_MEDIA_RW, AID_MEDIA_RW, 0007, true);
+    } else {
+        ret = ::mount(mDevPath.c_str(), mRawPath.c_str(), mFsType.c_str(), 0, NULL);
+    }
+
+    if (ret) {
         PLOG(ERROR) << getId() << " failed to mount " << mDevPath;
         return -EIO;
     }
@@ -227,17 +261,35 @@ status_t PublicVolume::doUnmount() {
 }
 
 status_t PublicVolume::doFormat(const std::string& fsType) {
-    if (fsType == "vfat" || fsType == "auto") {
-        if (WipeBlockDevice(mDevPath) != OK) {
-            LOG(WARNING) << getId() << " failed to wipe";
-        }
-        if (vfat::Format(mDevPath, 0)) {
-            LOG(ERROR) << getId() << " failed to format";
-            return -errno;
-        }
-    } else {
+    // "auto" is used for newly partitioned disks (see Disk::partition*)
+    // and thus is restricted to external/removable storage.
+    if (!(IsFilesystemSupported(fsType) || fsType == "auto")) {
         LOG(ERROR) << "Unsupported filesystem " << fsType;
         return -EINVAL;
+    }
+
+    if (WipeBlockDevice(mDevPath) != OK) {
+        LOG(WARNING) << getId() << " failed to wipe";
+    }
+
+    int ret = 0;
+    if (fsType == "auto") {
+        ret = vfat::Format(mDevPath, 0);
+    } else if (fsType == "exfat") {
+        ret = exfat::Format(mDevPath);
+    } else if (fsType == "ntfs") {
+        ret = ntfs::Format(mDevPath, 0);
+    } else if (fsType == "vfat") {
+        ret = vfat::Format(mDevPath, 0);
+    } else {
+        LOG(ERROR) << getId() << " unrecognized filesystem " << fsType;
+        ret = -1;
+        errno = EIO;
+    }
+
+    if (ret) {
+        LOG(ERROR) << getId() << " failed to format";
+        return -errno;
     }
 
     return OK;
