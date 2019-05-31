@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 The Android Open Source Project
+ * Copyright (C) 2015 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,30 +21,30 @@
 
 #include <logwrap/logwrap.h>
 
-#include "Exfat.h"
+#include "Ntfs.h"
 #include "Utils.h"
 
 using android::base::StringPrintf;
 
 namespace android {
 namespace vold {
-namespace exfat {
+namespace ntfs {
 
 #ifdef MINIVOLD
-static const char* kMkfsPath = "/sbin/mkfs.exfat";
-static const char* kFsckPath = "/sbin/fsck.exfat";
-#ifdef CONFIG_KERNEL_HAVE_EXFAT
+static const char* kMkfsPath = "/sbin/mkfs.ntfs";
+static const char* kFsckPath = "/sbin/fsck.ntfs";
+#ifdef CONFIG_KERNEL_HAVE_NTFS
 static const char* kMountPath = "/sbin/mount";
 #else
-static const char* kMountPath = "/sbin/mount.exfat";
+static const char* kMountPath = "/sbin/mount.ntfs";
 #endif
 #else
-static const char* kMkfsPath = "/system/bin/mkfs.exfat";
-static const char* kFsckPath = "/system/bin/fsck.exfat";
-#ifdef CONFIG_KERNEL_HAVE_EXFAT
+static const char* kMkfsPath = "/system/bin/mkfs.ntfs";
+static const char* kFsckPath = "/system/bin/fsck.ntfs";
+#ifdef CONFIG_KERNEL_HAVE_NTFS
 static const char* kMountPath = "/system/bin/mount";
 #else
-static const char* kMountPath = "/system/bin/mount.exfat";
+static const char* kMountPath = "/system/bin/mount.ntfs";
 #endif
 #endif
 
@@ -52,12 +52,13 @@ bool IsSupported() {
     return access(kMkfsPath, X_OK) == 0
             && access(kFsckPath, X_OK) == 0
             && access(kMountPath, X_OK) == 0
-            && IsFilesystemSupported("exfat");
+            && IsFilesystemSupported("ntfs");
 }
 
 status_t Check(const std::string& source) {
     std::vector<std::string> cmd;
     cmd.push_back(kFsckPath);
+    cmd.push_back("-n");
     cmd.push_back(source);
 
     int rc = ForkExecvp(cmd, sFsckUntrustedContext);
@@ -73,29 +74,31 @@ status_t Check(const std::string& source) {
 
 status_t Mount(const std::string& source, const std::string& target, int ownerUid, int ownerGid,
                int permMask) {
-    int mountFlags = MS_NODEV | MS_NOSUID | MS_DIRSYNC | MS_NOATIME | MS_NOEXEC;
-    auto mountData = android::base::StringPrintf("uid=%d,gid=%d,fmask=%o,dmask=%o", ownerUid,
-                                                 ownerGid, permMask, permMask);
+    auto mountData = android::base::StringPrintf("utf8,uid=%d,gid=%d,fmask=%o,dmask=%o,"
+                                                 "shortname=mixed,nodev,nosuid,dirsync,noatime,"
+                                                 "noexec", ownerUid, ownerGid, permMask, permMask);
 
     std::vector<std::string> cmd;
     cmd.push_back(kMountPath);
-#ifdef CONFIG_KERNEL_HAVE_EXFAT
-    cmd.push_back("-t");
-    cmd.push_back("exfat");
-#endif
     cmd.push_back("-o");
-    cmd.push_back(mountData);
+    cmd.push_back(mountData.c_str());
     cmd.push_back(source.c_str());
     cmd.push_back(target.c_str());
 
-    return ForkExecvp(cmd);
+    int rc = ForkExecvp(cmd);
+    if (rc == 0) {
+        LOG(INFO) << "Mount OK";
+        return 0;
+    } else {
+        LOG(ERROR) << "Mount failed (code " << rc << ")";
+        errno = EIO;
+        return -1;
+    }
 }
 
 status_t Format(const std::string& source) {
     std::vector<std::string> cmd;
     cmd.push_back(kMkfsPath);
-    cmd.push_back("-n");
-    cmd.push_back("android");
     cmd.push_back(source);
 
     int rc = ForkExecvp(cmd);
@@ -110,6 +113,6 @@ status_t Format(const std::string& source) {
     return 0;
 }
 
-}  // namespace exfat
+}  // namespace ntfs
 }  // namespace vold
 }  // namespace android
