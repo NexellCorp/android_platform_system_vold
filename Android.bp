@@ -158,11 +158,18 @@ cc_binary {
                 "libarcobbvolume",
             ],
         },
+        normalboot: {
+            init_rc: [
+                "vold.rc",
+                "wait_for_keymaster.rc",
+            ],
+        },
+        quickboot: {
+            init_rc: [
+                "vold.rc",
+            ],
+        },
     },
-    init_rc: [
-        "vold.rc",
-        "wait_for_keymaster.rc",
-    ],
 
     required: [
         "mke2fs",
