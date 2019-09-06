@@ -92,7 +92,11 @@ VolumeManager::VolumeManager() {
     mNextObbId = 0;
     // For security reasons, assume that a secure keyguard is
     // showing until we hear otherwise
+#ifndef QUICKBOOT
     mSecureKeyguardShowing = true;
+#else
+    mSecureKeyguardShowing = false;
+#endif
 }
 
 VolumeManager::~VolumeManager() {
@@ -235,14 +239,19 @@ void VolumeManager::handleBlockEvent(NetlinkEvent *evt) {
 void VolumeManager::handleDiskAdded(const std::shared_ptr<android::vold::Disk>& disk) {
     // For security reasons, if secure keyguard is showing, wait
     // until the user unlocks the device to actually touch it
+#ifndef QUICKBOOT
     if (mSecureKeyguardShowing) {
         LOG(INFO) << "Found disk at " << disk->getEventPath()
                 << " but delaying scan due to secure keyguard";
         mPendingDisks.push_back(disk);
     } else {
+#else
         disk->create();
         mDisks.push_back(disk);
+#endif
+#ifndef QUICKBOOT
     }
+#endif
 }
 
 void VolumeManager::handleDiskChanged(dev_t device) {
@@ -392,6 +401,7 @@ int VolumeManager::onUserStopped(userid_t userId) {
 }
 
 int VolumeManager::onSecureKeyguardStateChanged(bool isShowing) {
+#ifndef QUICKBOOT
     mSecureKeyguardShowing = isShowing;
     if (!mSecureKeyguardShowing) {
         // Now that secure keyguard has been dismissed, process
@@ -402,6 +412,17 @@ int VolumeManager::onSecureKeyguardStateChanged(bool isShowing) {
         }
         mPendingDisks.clear();
     }
+#else
+    if (!isShowing) {
+        mSecureKeyguardShowing = isShowing;
+
+        for (const auto& disk : mPendingDisks) {
+            disk->create();
+            mDisks.push_back(disk);
+        }
+        mPendingDisks.clear();
+    }
+#endif
     return 0;
 }
 
