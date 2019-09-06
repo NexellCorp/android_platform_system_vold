@@ -21,6 +21,17 @@ cc_defaults {
     tidy_flags: [
         "-warnings-as-errors=clang-analyzer-security*,cert-*",
     ],
+
+    product_variables: {
+        quickboot: {
+            cppflags: [
+                "-DQUICKBOOT",
+            ],
+            cflags: [
+                "-DQUICKBOOT",
+            ]
+        },
+    },
 }
 
 cc_defaults {
