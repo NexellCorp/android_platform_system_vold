@@ -245,10 +245,9 @@ void VolumeManager::handleDiskAdded(const std::shared_ptr<android::vold::Disk>& 
                 << " but delaying scan due to secure keyguard";
         mPendingDisks.push_back(disk);
     } else {
-#else
+#endif
         disk->create();
         mDisks.push_back(disk);
-#endif
 #ifndef QUICKBOOT
     }
 #endif
